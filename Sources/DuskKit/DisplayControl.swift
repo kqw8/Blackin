@@ -103,6 +103,15 @@ final class DisplayServicesAPI {
     }
 }
 
+/// All online display ids via the public CoreGraphics API (shared by the backend and BrightnessMonitor).
+func onlineDisplayIDs() -> [CGDirectDisplayID] {
+    var count: UInt32 = 0
+    guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+    var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+    guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return [] }
+    return Array(ids.prefix(Int(count)))
+}
+
 // MARK: - Real backend
 
 public final class SystemDisplayBackend: DisplayBackend {
@@ -114,11 +123,7 @@ public final class SystemDisplayBackend: DisplayBackend {
     public var brightnessControlAvailable: Bool { ds.brightnessAvailable }
 
     public func onlineDisplays() -> [DisplayInfo] {
-        var count: UInt32 = 0
-        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
-        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return [] }
-        return ids.prefix(Int(count)).map { id in
+        onlineDisplayIDs().map { id in
             DisplayInfo(id: id,
                         isBuiltin: CGDisplayIsBuiltin(id) != 0,
                         isActive: CGDisplayIsActive(id) != 0,

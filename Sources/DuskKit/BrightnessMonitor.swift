@@ -61,12 +61,17 @@ public final class BrightnessMonitor {
 
     /// Re-sync registrations to the current online built-in displays. Call after a topology change: the built-in's
     /// id is stable in practice, but this keeps us correct if it ever changes (and is a cheap no-op when it doesn't).
+    /// A failed registration is NOT marked registered, so the next refresh retries it.
     public func refresh() {
         guard started, let registerFn else { return }
         let current = Set(builtinDisplays())
-        for id in registered.subtracting(current) { _ = unregisterFn?(id, contextBits) }
-        for id in current.subtracting(registered) { _ = registerFn(id, contextBits, brightnessChangeCallback) }
-        registered = current
+        for id in registered.subtracting(current) {
+            _ = unregisterFn?(id, contextBits)
+            registered.remove(id)
+        }
+        for id in current.subtracting(registered) where registerFn(id, contextBits, brightnessChangeCallback) == 0 {
+            registered.insert(id)
+        }
     }
 
     /// Debounce a brightness change into a single `onChange` (collapses a slider drag's burst of callbacks).
@@ -86,11 +91,7 @@ public final class BrightnessMonitor {
 
     /// Online built-in display ids via the public CoreGraphics API (default source for `builtinDisplays`).
     public static func onlineBuiltins() -> [CGDirectDisplayID] {
-        var count: UInt32 = 0
-        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
-        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return [] }
-        return ids.prefix(Int(count)).filter { CGDisplayIsBuiltin($0) != 0 }
+        onlineDisplayIDs().filter { CGDisplayIsBuiltin($0) != 0 }
     }
 }
 

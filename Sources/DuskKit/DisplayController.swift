@@ -74,11 +74,15 @@ public final class DisplayController {
         // and the session's recorded priorBrightness, so restore later still returns to the right value.
         if state.state.engaged, state.state.reclaimed,
            (backend.brightness(of: internalID) ?? 1) <= reArmThreshold {
-            state.update { $0.reclaimed = false }
+            // Mirror first, drop the yield only once it sticks: failing the other way around would leave
+            // engaged+unmirrored, which the maintenance branch misreads as a fresh switch-to-extended and
+            // answers by re-lighting the very screen the user just dragged dark. Staying yielded instead
+            // means the next event simply retries this re-arm.
             guard ensureMirrored(internalID, externals: externals) else {
                 fail("Failed to set mirroring; not applied")
                 return
             }
+            state.update { $0.reclaimed = false }
             if assertDark(internalID) {
                 log?("Built-in dragged to off while connected: re-dimming (no reconnect needed)")
             } else {
@@ -240,9 +244,10 @@ public final class DisplayController {
         // Restore to pre-dim brightness (only set when still dark or forced, to avoid fighting the user's manual brightness changes).
         let current = backend.brightness(of: internalID) ?? 0
         if force || current < darkThreshold {
-            // Normally priorBrightness is always > epsilon; if it got polluted to ~0 (state corrupt/tampered),
-            // fall back to full brightness -- never "restore" to a value like 0.01 that is actually still dark.
-            let target = state.state.priorBrightness > epsilon ? state.state.priorBrightness : 1.0
+            // If priorBrightness is itself a dark value (state corrupt/tampered, or the user plugged in while
+            // near-black), fall back to full brightness -- "restoring" to a still-dark value would leave the only
+            // screen dark (rule 3) and the self-heal would keep re-asserting that same dark value forever.
+            let target = state.state.priorBrightness > darkThreshold ? state.state.priorBrightness : 1.0
             backend.setBrightness(target, of: internalID)
         }
         // Auto-brightness was originally on -> turn it back on and let it take over subsequent tweaks.

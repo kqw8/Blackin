@@ -444,6 +444,46 @@ struct DisplayControllerTests {
         #expect(state.state.reclaimed == false)
     }
 
+    // Re-arm failure path: if re-mirroring fails, STAY yielded. Dropping the yield first would leave
+    // engaged+unmirrored, which the maintenance branch misreads as switch-to-extended and answers by
+    // re-lighting the very screen the user just dragged dark.
+    @Test func reArmMirrorFailureStaysYielded() {
+        let backend = MockDisplayBackend(
+            displays: [.builtin(internalID), .external(externalID)],
+            brightness: [internalID: 0.0, externalID: 0.5],
+            autoBrightness: [internalID: true],
+            hasALC: [internalID: true],
+            mirror: [:])
+        backend.mirrorSucceeds = false
+        let state = tempState()
+        state.update {
+            $0.engaged = true; $0.reclaimed = true
+            $0.priorAutoBrightness = true; $0.priorBrightness = 0.7
+        }
+        DisplayController(backend: backend, state: state).evaluate()
+
+        #expect(state.state.reclaimed)                  // still yielded -> next event just retries
+        #expect(backend.brightnessSets.isEmpty)         // hands off the screen entirely
+        #expect(backend.autoBrightnessSets.isEmpty)
+        #expect(state.state.lastError != nil)           // but failed loudly
+    }
+
+    // Restore must never target a value that is itself dark: a recorded priorBrightness below darkThreshold
+    // (corrupt state, or the user plugged in while near-black) falls back to full brightness (rule 3) --
+    // otherwise the self-heal would keep "restoring" the only screen to a black value forever.
+    @Test func restoreFallsBackToFullWhenPriorIsDark() {
+        let backend = MockDisplayBackend(
+            displays: [.builtin(internalID)],
+            brightness: [internalID: 0.0],
+            autoBrightness: [internalID: false],
+            hasALC: [internalID: true])
+        let state = tempState()
+        state.update { $0.engaged = true; $0.priorBrightness = 0.05; $0.priorAutoBrightness = true }
+        DisplayController(backend: backend, state: state).evaluate()
+
+        #expect(approx(backend.brightnessMap[internalID], 1.0))   // not 0.05, which would still be dark
+    }
+
     // Anti-loop: in steady state (engaged, mirrored, already at 0) re-asserting must NOT write brightness again --
     // a redundant setBrightness(0) would re-fire the brightness-change notification and bounce us in a tight loop.
     @Test func reAssertDoesNotRewriteWhenAlreadyDark() {

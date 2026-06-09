@@ -112,7 +112,13 @@ func runService(foreground: Bool) -> Never {
         exit(0)
     }
 
-    app.run()   // NSApplication event loop: delivers WindowServer external notifications + dispatch + signals
+    // The monitors must outlive this scope, but ARC may release locals after their last use, and neither
+    // CG's reconfiguration callback nor the notification center holds a strong reference to them (both get
+    // unretained pointers) -- an optimized build could deallocate them right after start() and the daemon
+    // would silently go deaf (their deinits even unregister everything). Same reason signalSources is global.
+    withExtendedLifetime((monitor, brightnessMonitor)) {
+        app.run()   // NSApplication event loop: delivers WindowServer external notifications + dispatch + signals
+    }
     // app.run() never returns.
     fatalError("event loop exited unexpectedly")
 }
