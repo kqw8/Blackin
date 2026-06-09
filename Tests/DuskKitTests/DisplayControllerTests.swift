@@ -398,6 +398,88 @@ struct DisplayControllerTests {
         #expect(state.state.reclaimed == false)
     }
 
+    // Re-arm: yielded with the external still connected, the user drags the built-in back to ~0 (explicit
+    // "dim it again"). Re-engage in place -- no unplug/replug -- keeping engaged + the recorded priorBrightness.
+    @Test func reEngagesWhenUserDragsBuiltinToOff() {
+        let backend = MockDisplayBackend(
+            displays: [.mirroredBuiltin(internalID), .external(externalID)],
+            brightness: [internalID: 0.0, externalID: 0.5],
+            autoBrightness: [internalID: true],
+            hasALC: [internalID: true],
+            mirror: [internalID: externalID])
+        let state = tempState()
+        state.update {
+            $0.engaged = true; $0.reclaimed = true
+            $0.priorAutoBrightness = true; $0.priorBrightness = 0.7
+        }
+        DisplayController(backend: backend, state: state).evaluate()
+
+        #expect(backend.autoBrightnessMap[internalID] == false)   // auto-brightness re-disabled
+        #expect(backend.brightnessMap[internalID] == 0)           // held dark
+        #expect(state.state.engaged)
+        #expect(state.state.reclaimed == false)                   // yield dropped
+        #expect(approx(state.state.priorBrightness, 0.7))         // NOT polluted by the dragged-to-0 value
+    }
+
+    // Re-arm from the extended-yield case: the built-in isn't mirrored anymore, so dragging it to ~0 must
+    // re-establish the mirror as well as re-dim.
+    @Test func reEngageFromYieldedExtendedReMirrors() {
+        let backend = MockDisplayBackend(
+            displays: [.builtin(internalID), .external(externalID)],
+            brightness: [internalID: 0.0, externalID: 0.5],
+            autoBrightness: [internalID: true],
+            hasALC: [internalID: true],
+            mirror: [:])
+        let state = tempState()
+        state.update {
+            $0.engaged = true; $0.reclaimed = true
+            $0.priorAutoBrightness = true; $0.priorBrightness = 0.7
+        }
+        DisplayController(backend: backend, state: state).evaluate()
+
+        #expect(backend.mirrorMap[internalID] == externalID)   // re-mirrored
+        #expect(state.state.weChangedMirror)
+        #expect(backend.brightnessMap[internalID] == 0)
+        #expect(state.state.engaged)
+        #expect(state.state.reclaimed == false)
+    }
+
+    // Anti-loop: in steady state (engaged, mirrored, already at 0) re-asserting must NOT write brightness again --
+    // a redundant setBrightness(0) would re-fire the brightness-change notification and bounce us in a tight loop.
+    @Test func reAssertDoesNotRewriteWhenAlreadyDark() {
+        let backend = MockDisplayBackend(
+            displays: [.mirroredBuiltin(internalID), .external(externalID)],
+            brightness: [internalID: 0.0, externalID: 0.5],
+            autoBrightness: [internalID: false],
+            hasALC: [internalID: true],
+            mirror: [internalID: externalID])
+        let state = tempState()
+        state.update { $0.engaged = true }
+        DisplayController(backend: backend, state: state).evaluate()
+
+        #expect(backend.brightnessSets.isEmpty)   // no redundant write -> nothing to re-trigger the loop
+    }
+
+    // Yielding a dark (extended) built-in whose pre-dim brightness was unusually low must raise it to the visible
+    // floor, not back to that dim value -- otherwise handing it back would instantly read as a "dragged to off" re-arm.
+    @Test func yieldRaisesDarkBuiltinToVisibleFloor() {
+        let backend = MockDisplayBackend(
+            displays: [.builtin(internalID), .external(externalID)],
+            brightness: [internalID: 0, externalID: 0.5],
+            autoBrightness: [internalID: false],
+            hasALC: [internalID: true],
+            mirror: [:])
+        let state = tempState()
+        state.update {
+            $0.engaged = true; $0.weChangedMirror = true
+            $0.priorAutoBrightness = true; $0.priorBrightness = 0.1   // unusually dim
+        }
+        DisplayController(backend: backend, state: state).evaluate()
+
+        #expect(approx(backend.brightnessMap[internalID], 0.3))   // floored to a usable, > reArmThreshold value
+        #expect(state.state.reclaimed)
+    }
+
     // Multi-monitor: unplugging the mirror MASTER (one of several externals) must heal by re-mirroring to a
     // remaining external, NOT be mistaken for the user switching to extended (which would yield + light the laptop).
     @Test func unpluggingMirrorMasterHealsInsteadOfYielding() {

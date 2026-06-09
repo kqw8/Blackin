@@ -4,7 +4,7 @@ import AppKit
 import DuskKit
 
 /// Version baked into the binary. Bump this together with the release tag when cutting a release.
-let duskVersion = "0.1.0"
+let duskVersion = "0.2.0"
 
 // MARK: - General helpers
 
@@ -82,9 +82,20 @@ func runService(foreground: Bool) -> Never {
         printErr("Warning: brightness control API unavailable; cannot dim the built-in display (macOS may have changed).")
     }
 
+    // Two event sources, both funneling into the same idempotent evaluate():
+    //   - DisplayMonitor: plug/unplug/wake (display reconfiguration + power notifications).
+    //   - BrightnessMonitor: manual brightness changes, which fire NO reconfiguration callback -- this is what
+    //     lets "drag the built-in to off" re-engage without an unplug/replug. On a topology change we re-sync
+    //     its registrations (the built-in id is stable in practice, but this stays correct if it ever changes).
+    let brightnessMonitor = BrightnessMonitor()
+    brightnessMonitor.onChange = { controller.evaluate() }
     let monitor = DisplayMonitor()
-    monitor.onChange = { controller.evaluate() }
+    monitor.onChange = {
+        brightnessMonitor.refresh()
+        controller.evaluate()
+    }
     monitor.start()
+    brightnessMonitor.start()
 
     if foreground {
         print("dusk running in the foreground. Press Ctrl-C to quit.")
