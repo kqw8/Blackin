@@ -27,6 +27,12 @@ public final class DisplayController {
     private let reclaimThreshold: Float = 0.15
     /// At/below this the built-in counts as "effectively dark" -- the cutoff the restore/self-heal guards use.
     private let darkThreshold: Float = 0.1
+    /// While yielded to the user, dragging the built-in at/below this counts as an explicit "dim it again" -- re-engage
+    /// without an unplug/replug. Kept well below `yieldVisibleFloor` so handing the built-in back never reads as this.
+    private let reArmThreshold: Float = 0.05
+    /// When yielding a dark built-in back to the user, raise it at least this high so it's actually usable *and*
+    /// clearly above `reArmThreshold` (otherwise the very act of yielding would re-trigger the re-engage above).
+    private let yieldVisibleFloor: Float = 0.3
     /// The external we last mirrored the built-in onto. Lets us tell "the mirror master got unplugged" (heal by
     /// re-mirroring to a remaining external) apart from "the user switched the built-in to extended" (yield).
     /// In-memory: after the first engage it's always set; an unknown (nil) un-mirror is treated as a user switch.
@@ -61,6 +67,26 @@ public final class DisplayController {
     // MARK: - Ensure built-in is dimmed (idempotent assertion)
 
     private func ensureDimmed(_ internalID: CGDirectDisplayID, externals: [CGDirectDisplayID]) {
+        // Manual re-arm: while we've yielded the built-in to the user, them dragging its brightness back down to
+        // ~off is an explicit "dim it again" -- re-engage in place (re-mirror + re-dim) without an unplug/replug.
+        // `yieldToUser` guarantees a yielded built-in is left visibly lit (> reArmThreshold), so a brightness at/below
+        // reArmThreshold here is necessarily the user's deliberate action, never our own restore. We keep engaged=true
+        // and the session's recorded priorBrightness, so restore later still returns to the right value.
+        if state.state.engaged, state.state.reclaimed,
+           (backend.brightness(of: internalID) ?? 1) <= reArmThreshold {
+            state.update { $0.reclaimed = false }
+            guard ensureMirrored(internalID, externals: externals) else {
+                fail("Failed to set mirroring; not applied")
+                return
+            }
+            if assertDark(internalID) {
+                log?("Built-in dragged to off while connected: re-dimming (no reconnect needed)")
+            } else {
+                fail("Could not disable the built-in's auto-brightness (private symbol may be gone); it may re-light")
+            }
+            return
+        }
+
         // Already engaged this session: maintain, heal a topology change, or yield to a manual takeover.
         if state.state.engaged {
             // We've already handed control back to the user this session: stay out until they reconnect.
@@ -116,21 +142,11 @@ public final class DisplayController {
             }
         }
 
-        // Assert mirroring: if already mirrored to *some* online external, leave it alone -- with multiple
-        // externals, this avoids flipping the mirror target back and forth (and flickering) due to the unstable
-        // ordering of CGGetOnlineDisplayList. Only when not mirrored, or the mirror target is offline, do we
-        // mirror to a *deterministic* external (the lowest id).
-        let currentTarget = backend.mirrorTarget(of: internalID)
-        let mirroredToOnlineExternal = currentTarget.map { externals.contains($0) } ?? false
-        if !mirroredToOnlineExternal {
-            let target = externals.min()!   // deterministic choice, doesn't drift across calls
-            guard backend.setMirror(of: internalID, to: target) else {
-                fail("Failed to set mirroring; not applied")   // don't fall back to extended+dim
-                return
-            }
-            state.update { $0.weChangedMirror = true }
+        // Assert mirroring (see ensureMirrored); on failure don't fall back to extended+dim.
+        guard ensureMirrored(internalID, externals: externals) else {
+            fail("Failed to set mirroring; not applied")
+            return
         }
-        lastMirrorTarget = backend.mirrorTarget(of: internalID)
 
         // Assert: turn off auto-brightness (the root cause) + zero brightness.
         let darkHeld = assertDark(internalID)
@@ -146,6 +162,22 @@ public final class DisplayController {
         }
     }
 
+    /// Mirror the built-in onto an online external. If it's already mirrored to *some* online external, leave it
+    /// alone -- with multiple externals this avoids flipping the target back and forth (and flickering) due to the
+    /// unstable ordering of CGGetOnlineDisplayList. Only when not mirrored, or the target is offline, do we mirror to
+    /// a *deterministic* external (the lowest id). Returns false only when a needed mirror change failed.
+    private func ensureMirrored(_ internalID: CGDirectDisplayID, externals: [CGDirectDisplayID]) -> Bool {
+        let currentTarget = backend.mirrorTarget(of: internalID)
+        let mirroredToOnlineExternal = currentTarget.map { externals.contains($0) } ?? false
+        if !mirroredToOnlineExternal {
+            let target = externals.min()!   // deterministic choice, doesn't drift across calls
+            guard backend.setMirror(of: internalID, to: target) else { return false }
+            state.update { $0.weChangedMirror = true }
+        }
+        lastMirrorTarget = backend.mirrorTarget(of: internalID)
+        return true
+    }
+
     /// Re-assert "off": disable auto-brightness (if the panel supports it) and set brightness to 0. Idempotent.
     /// Returns false if auto-brightness is supported but could NOT be disabled (so 0 won't hold against ambient light).
     @discardableResult
@@ -154,7 +186,11 @@ public final class DisplayController {
         if backend.hasAutoBrightness(of: internalID) {
             autoBrightnessHeld = backend.setAutoBrightness(false, of: internalID)
         }
-        backend.setBrightness(0, of: internalID)
+        // Only write when not already dark: a redundant setBrightness(0) re-fires the brightness-change
+        // notification, bouncing us back through evaluate() in a tight loop (and flickering). Once at 0 it holds.
+        if (backend.brightness(of: internalID) ?? 1) > epsilon {
+            backend.setBrightness(0, of: internalID)
+        }
         return autoBrightnessHeld
     }
 
@@ -166,8 +202,10 @@ public final class DisplayController {
         }
         // If it's still dark (e.g. switched to extended, leaving it a black second screen), raise it so it's
         // usable. If the user reclaimed by raising the brightness themselves, leave their value untouched.
+        // Floor the restore at yieldVisibleFloor: it must be both genuinely usable and clearly above reArmThreshold,
+        // so handing the built-in back never itself trips the "dragged to off" re-engage on the next evaluate.
         if (backend.brightness(of: internalID) ?? 0) < reclaimThreshold {
-            let restoreTo = state.state.priorBrightness > epsilon ? state.state.priorBrightness : 1.0
+            let restoreTo = max(state.state.priorBrightness, yieldVisibleFloor)
             backend.setBrightness(restoreTo, of: internalID)
         }
         state.update { $0.reclaimed = true }

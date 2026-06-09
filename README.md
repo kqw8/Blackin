@@ -66,11 +66,11 @@ When an external display is connected, the tool:
 
 On disconnect it reverses all of that.
 
-**Manual override:** while an external is connected, if you switch the built-in back to *extended* mode or raise its brightness yourself, Dusk takes the hint — it hands the built-in back and stays out of your way until you reconnect the external. It never traps you with a screen it won't give back.
+**Manual override:** while an external is connected, if you switch the built-in back to *extended* mode or raise its brightness yourself, Dusk takes the hint — it hands the built-in back and stays out of your way. It never traps you with a screen it won't give back. To dim it again, just **drag the built-in's brightness back down to 0** — Dusk reads that as "dim it again" and re-engages on the spot, no unplug/replug needed (reconnecting the external still re-engages too, as before).
 
 macOS has **no public API to truly "turn off" a single display**, so dimming the backlight to zero is the closest thing — this is the same approach used by tools like BetterDisplay, MonitorControl, and Lunar. Brightness and auto-brightness are controlled through Apple's private `DisplayServices` framework, which is loaded at runtime (`dlopen`); if a macOS update ever removes those symbols, the tool degrades gracefully and tells you instead of misbehaving silently.
 
-It is **event-driven** (no polling): it reacts to display reconfiguration and wake events. It runs as a `launchd` user agent and keeps no log while healthy — it only speaks up (a notification + `status`) when something fails. Those failures are also captured in `~/Library/Logs/dusk.out.log` and `dusk.err.log`.
+It is **event-driven** (no polling): it reacts to display reconfiguration, wake, and built-in **brightness-change** events (the last via a private `DisplayServices` notification — manual brightness changes fire no reconfiguration callback, so this is what makes "drag to 0 re-engages" instant). It runs as a `launchd` user agent and keeps no log while healthy — it only speaks up (a notification + `status`) when something fails. Those failures are also captured in `~/Library/Logs/dusk.out.log` and `dusk.err.log`.
 
 ## Permissions
 
