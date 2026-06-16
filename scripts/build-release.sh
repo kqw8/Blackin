@@ -25,16 +25,16 @@ OUT="release"
 build_arch() {  # $1 = arch (arm64 | x86_64)
   local arch="$1"
   local scratch=".build-$arch"
-  swift build -c release --scratch-path "$scratch" \
-    -Xswiftc -target -Xswiftc "$arch-apple-macosx$DEPLOY" >/dev/null
-  swift build -c release --scratch-path "$scratch" \
-    -Xswiftc -target -Xswiftc "$arch-apple-macosx$DEPLOY" --show-bin-path
+  local triple="$arch-apple-macosx$DEPLOY"
+  rm -rf "$scratch"
+  swift build -c release --scratch-path "$scratch" --triple "$triple" >/dev/null
+  swift build -c release --scratch-path "$scratch" --triple "$triple" --show-bin-path
 }
 
 echo "▸ Building arm64 ..."
-ARM64_DIR="$(build_arch arm64)"
+ARM64_DIR="$(build_arch arm64)" || exit 1
 echo "▸ Building x86_64 ..."
-X86_DIR="$(build_arch x86_64)"
+X86_DIR="$(build_arch x86_64)" || exit 1
 
 rm -rf "$OUT"; mkdir -p "$OUT"
 echo "▸ Merging into a universal binary with lipo ..."
